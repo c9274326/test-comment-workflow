@@ -8,12 +8,16 @@ env:
   CI_TEST_REPO: https://github.com/free5gc/ci-test
   CI_TEST_DIR: ci-test
   GO_VERSION: '1.24.5'
+  WAIT_TIMEOUT: 600
 
 jobs:
   pr-test:
     name: PR Test from Comment
     if: contains(github.event.comment.body, '#test')
-    runs-on: ubuntu-latest
+    # 重要：free5gc 測試需要 self-hosted runner
+    # 因為需要安裝 gtp5g kernel module 和設定 Linux network
+    # 如果沒有 self-hosted runner，可以改用 ubuntu-latest 但只能跑 Docker 測試
+    runs-on: [self-hosted, linux, x64]
     permissions:
       contents: read
       issues: write
@@ -50,45 +54,27 @@ jobs:
               content: 'rocket'
             });
 
-      - name: Setup Go
-        if: steps.parse.outputs.valid == 'true'
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          
-      - name: Setup Docker
+      - name: Check system requirements
         if: steps.parse.outputs.valid == 'true'
         run: |
-          # Docker 在 ubuntu-latest 已預裝，確認版本
+          echo "=== System Requirements Check ==="
+          echo "Docker:"
           docker --version
           docker compose version
-          
-          # 啟動 Docker daemon (如果需要)
-          sudo systemctl start docker || true
-          
-      - name: Install dependencies
-        if: steps.parse.outputs.valid == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y curl jq git
-          
-      - name: Verify environment
-        if: steps.parse.outputs.valid == 'true'
-        run: |
-          echo "=== Environment Check ==="
-          echo "Go version:"
+          echo ""
+          echo "Go:"
           go version
           echo ""
-          echo "Docker version:"
-          docker --version
-          echo ""
-          echo "Docker Compose version:"
-          docker compose version
-          echo ""
-          echo "Other tools:"
+          echo "Tools:"
           curl --version | head -1
           jq --version
           git --version
+          echo ""
+          echo "Kernel modules (gtp5g):"
+          lsmod | grep gtp5g || echo "gtp5g not loaded (will be loaded by test)"
+          echo ""
+          echo "Network interfaces:"
+          ip link show | grep -E "^[0-9]+" | head -10
 
       - name: Clone ci-test repository
         if: steps.parse.outputs.valid == 'true'
@@ -103,16 +89,23 @@ jobs:
           cd ${{ env.CI_TEST_DIR }}
           chmod +x ci-operation-pr.sh
           
+          echo "========================================"
           echo "Running: ./ci-operation-pr.sh nf ${{ steps.parse.outputs.args }}"
+          echo "========================================"
           
           # 執行並捕獲輸出
+          set +e
           ./ci-operation-pr.sh nf ${{ steps.parse.outputs.args }} 2>&1 | tee test_output.txt
           EXIT_CODE=${PIPESTATUS[0]}
+          set -e
           
-          # 儲存最後 200 行輸出
+          # 儲存最後 300 行輸出
           echo "output<<EOF" >> $GITHUB_OUTPUT
-          tail -200 test_output.txt >> $GITHUB_OUTPUT
+          tail -300 test_output.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          
+          # 儲存退出碼
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
           
           exit $EXIT_CODE
 
@@ -125,6 +118,7 @@ jobs:
             ${{ env.CI_TEST_DIR }}/testing_output/
             ${{ env.CI_TEST_DIR }}/test_output.txt
           if-no-files-found: ignore
+          retention-days: 7
 
       - name: Post success result
         if: success() && steps.parse.outputs.valid == 'true'
@@ -147,12 +141,13 @@ jobs:
               '<summary>📋 Test Output (click to expand)</summary>',
               '',
               '```',
-              output.slice(-3000),
+              output.slice(-4000),
               '```',
               '',
               '</details>',
               '',
-              `[View full workflow run](${runUrl})`
+              `📎 [View full workflow run](${runUrl})`,
+              `📦 [Download test artifacts](${runUrl}#artifacts)`
             ].join('\n');
 
             await github.rest.issues.createComment({
@@ -183,12 +178,13 @@ jobs:
               '<summary>📋 Test Output (click to expand)</summary>',
               '',
               '```',
-              output.slice(-3000),
+              output.slice(-4000),
               '```',
               '',
               '</details>',
               '',
-              `[View full workflow run](${runUrl})`
+              `📎 [View full workflow run](${runUrl})`,
+              `📦 [Download test artifacts](${runUrl}#artifacts)`
             ].join('\n');
 
             await github.rest.issues.createComment({
@@ -198,9 +194,14 @@ jobs:
               body: body
             });
 
-      - name: Cleanup
+      - name: Cleanup docker resources
         if: always() && steps.parse.outputs.valid == 'true'
         run: |
-          echo "Cleaning up..."
+          echo "Cleaning up docker resources..."
           docker system prune -f || true
+          docker volume prune -f || true
+
+      - name: Clean up repositories
+        if: always() && steps.parse.outputs.valid == 'true'
+        run: |
           rm -rf ${{ env.CI_TEST_DIR }}
