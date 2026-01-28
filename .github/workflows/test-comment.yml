@@ -1,13 +1,17 @@
-name: Test Comment Trigger
+name: PR Test via Comment
 
 on:
   issue_comment:
     types: [created]
 
+env:
+  CI_TEST_REPO: https://github.com/free5gc/ci-test
+  CI_TEST_DIR: ci-test
+  GO_VERSION: '1.24.5'
+
 jobs:
-  test:
-    name: Test from Comment
-    # 使用 GitHub 免費 runner，不需要 self-hosted！
+  pr-test:
+    name: PR Test from Comment
     if: contains(github.event.comment.body, '#test')
     runs-on: ubuntu-latest
     permissions:
@@ -16,7 +20,7 @@ jobs:
       pull-requests: write
     
     steps:
-      - name: Parse comment
+      - name: Parse test command
         id: parse
         uses: actions/github-script@v7
         with:
@@ -25,15 +29,17 @@ jobs:
             const match = comment.match(/#test\s+(.+?)(?:\n|$)/);
             
             if (!match) {
-              core.setFailed('Invalid format. Use: #test <args>');
+              core.setFailed('Invalid format. Use: #test <nf_name> <pr_number> ...');
               return;
             }
             
             const args = match[1].trim();
-            console.log(`Parsed: ${args}`);
+            console.log(`Parsed arguments: ${args}`);
             core.setOutput('args', args);
+            core.setOutput('valid', 'true');
 
       - name: Add rocket reaction
+        if: steps.parse.outputs.valid == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -44,19 +50,147 @@ jobs:
               content: 'rocket'
             });
 
-      - name: Simulate test
+      - name: Setup Go
+        if: steps.parse.outputs.valid == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Setup Docker
+        if: steps.parse.outputs.valid == 'true'
         run: |
-          echo "🧪 Would run: ./ci-operation-pr.sh nf ${{ steps.parse.outputs.args }}"
-          echo "✅ Comment trigger works!"
-          sleep 5
+          # Docker 在 ubuntu-latest 已預裝，確認版本
+          docker --version
+          docker compose version
+          
+          # 啟動 Docker daemon (如果需要)
+          sudo systemctl start docker || true
+          
+      - name: Install dependencies
+        if: steps.parse.outputs.valid == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq git
+          
+      - name: Verify environment
+        if: steps.parse.outputs.valid == 'true'
+        run: |
+          echo "=== Environment Check ==="
+          echo "Go version:"
+          go version
+          echo ""
+          echo "Docker version:"
+          docker --version
+          echo ""
+          echo "Docker Compose version:"
+          docker compose version
+          echo ""
+          echo "Other tools:"
+          curl --version | head -1
+          jq --version
+          git --version
 
-      - name: Reply success
+      - name: Clone ci-test repository
+        if: steps.parse.outputs.valid == 'true'
+        run: |
+          rm -rf ${{ env.CI_TEST_DIR }}
+          git clone ${{ env.CI_TEST_REPO }} ${{ env.CI_TEST_DIR }}
+
+      - name: Run ci-operation-pr.sh
+        id: run_test
+        if: steps.parse.outputs.valid == 'true'
+        run: |
+          cd ${{ env.CI_TEST_DIR }}
+          chmod +x ci-operation-pr.sh
+          
+          echo "Running: ./ci-operation-pr.sh nf ${{ steps.parse.outputs.args }}"
+          
+          # 執行並捕獲輸出
+          ./ci-operation-pr.sh nf ${{ steps.parse.outputs.args }} 2>&1 | tee test_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          
+          # 儲存最後 200 行輸出
+          echo "output<<EOF" >> $GITHUB_OUTPUT
+          tail -200 test_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          exit $EXIT_CODE
+
+      - name: Upload test report
+        if: always() && steps.parse.outputs.valid == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-test-report-${{ github.run_id }}
+          path: |
+            ${{ env.CI_TEST_DIR }}/testing_output/
+            ${{ env.CI_TEST_DIR }}/test_output.txt
+          if-no-files-found: ignore
+
+      - name: Post success result
+        if: success() && steps.parse.outputs.valid == 'true'
         uses: actions/github-script@v7
         with:
           script: |
+            const output = `${{ steps.run_test.outputs.output }}`;
+            const args = `${{ steps.parse.outputs.args }}`;
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
+            const body = `## ✅ PR Test Passed
+
+**Test Command:** \`#test ${args}\`
+
+<details>
+<summary>📋 Test Output (click to expand)</summary>
+
+\`\`\`
+${output.slice(-3000)}
+\`\`\`
+
+</details>
+
+[View full workflow run](${runUrl})`;
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.issue.number,
-              body: `✅ Test triggered successfully!\n\nArgs: \`${{ steps.parse.outputs.args }}\`\n\n[View run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
+              body: body
             });
+
+      - name: Post failure result
+        if: failure() && steps.parse.outputs.valid == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const output = `${{ steps.run_test.outputs.output }}` || 'No output captured';
+            const args = `${{ steps.parse.outputs.args }}`;
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
+            const body = `## ❌ PR Test Failed
+
+**Test Command:** \`#test ${args}\`
+
+<details>
+<summary>📋 Test Output (click to expand)</summary>
+
+\`\`\`
+${output.slice(-3000)}
+\`\`\`
+
+</details>
+
+[View full workflow run](${runUrl})`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: body
+            });
+
+      - name: Cleanup
+        if: always() && steps.parse.outputs.valid == 'true'
+        run: |
+          echo "Cleaning up..."
+          docker system prune -f || true
+          rm -rf ${{ env.CI_TEST_DIR }}
