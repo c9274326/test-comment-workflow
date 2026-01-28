@@ -10,6 +10,10 @@ jobs:
     # 使用 GitHub 免費 runner，不需要 self-hosted！
     if: contains(github.event.comment.body, '#test')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
     
     steps:
       - name: Parse comment
