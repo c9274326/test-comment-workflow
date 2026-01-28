@@ -129,26 +129,31 @@ jobs:
       - name: Post success result
         if: success() && steps.parse.outputs.valid == 'true'
         uses: actions/github-script@v7
+        env:
+          TEST_OUTPUT: ${{ steps.run_test.outputs.output }}
+          TEST_ARGS: ${{ steps.parse.outputs.args }}
         with:
           script: |
-            const output = `${{ steps.run_test.outputs.output }}`;
-            const args = `${{ steps.parse.outputs.args }}`;
+            const output = process.env.TEST_OUTPUT || '';
+            const args = process.env.TEST_ARGS;
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             
-            const body = `## ✅ PR Test Passed
-
-**Test Command:** \`#test ${args}\`
-
-<details>
-<summary>📋 Test Output (click to expand)</summary>
-
-\`\`\`
-${output.slice(-3000)}
-\`\`\`
-
-</details>
-
-[View full workflow run](${runUrl})`;
+            const body = [
+              '## ✅ PR Test Passed',
+              '',
+              `**Test Command:** \`#test ${args}\``,
+              '',
+              '<details>',
+              '<summary>📋 Test Output (click to expand)</summary>',
+              '',
+              '```',
+              output.slice(-3000),
+              '```',
+              '',
+              '</details>',
+              '',
+              `[View full workflow run](${runUrl})`
+            ].join('\n');
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -160,26 +165,31 @@ ${output.slice(-3000)}
       - name: Post failure result
         if: failure() && steps.parse.outputs.valid == 'true'
         uses: actions/github-script@v7
+        env:
+          TEST_OUTPUT: ${{ steps.run_test.outputs.output }}
+          TEST_ARGS: ${{ steps.parse.outputs.args }}
         with:
           script: |
-            const output = `${{ steps.run_test.outputs.output }}` || 'No output captured';
-            const args = `${{ steps.parse.outputs.args }}`;
+            const output = process.env.TEST_OUTPUT || 'No output captured';
+            const args = process.env.TEST_ARGS;
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             
-            const body = `## ❌ PR Test Failed
-
-**Test Command:** \`#test ${args}\`
-
-<details>
-<summary>📋 Test Output (click to expand)</summary>
-
-\`\`\`
-${output.slice(-3000)}
-\`\`\`
-
-</details>
-
-[View full workflow run](${runUrl})`;
+            const body = [
+              '## ❌ PR Test Failed',
+              '',
+              `**Test Command:** \`#test ${args}\``,
+              '',
+              '<details>',
+              '<summary>📋 Test Output (click to expand)</summary>',
+              '',
+              '```',
+              output.slice(-3000),
+              '```',
+              '',
+              '</details>',
+              '',
+              `[View full workflow run](${runUrl})`
+            ].join('\n');
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
