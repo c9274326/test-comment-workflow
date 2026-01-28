@@ -1,0 +1,58 @@
+name: Test Comment Trigger
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  test:
+    name: Test from Comment
+    # 使用 GitHub 免費 runner，不需要 self-hosted！
+    if: contains(github.event.comment.body, '#test')
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Parse comment
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment.body;
+            const match = comment.match(/#test\s+(.+?)(?:\n|$)/);
+            
+            if (!match) {
+              core.setFailed('Invalid format. Use: #test <args>');
+              return;
+            }
+            
+            const args = match[1].trim();
+            console.log(`Parsed: ${args}`);
+            core.setOutput('args', args);
+
+      - name: Add rocket reaction
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+
+      - name: Simulate test
+        run: |
+          echo "🧪 Would run: ./ci-operation-pr.sh nf ${{ steps.parse.outputs.args }}"
+          echo "✅ Comment trigger works!"
+          sleep 5
+
+      - name: Reply success
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: `✅ Test triggered successfully!\n\nArgs: \`${{ steps.parse.outputs.args }}\`\n\n[View run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`
+            });
